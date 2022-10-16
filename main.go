@@ -10,14 +10,13 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 )
 
 const defaultLimit = 100000
 
 type Parser interface {
 	Split(r rune) bool
-	ParseValues(r []string) (int64, int64, error)
+	ParseValues(r []string) (string, int64, int64, error)
 }
 
 type JsonParser struct{}
@@ -26,19 +25,19 @@ func (p JsonParser) Split(r rune) bool {
 	return r == ':' || r == ',' || r == ' ' || r == '}'
 }
 
-func (p JsonParser) ParseValues(r []string) (int64, int64, error) {
+func (p JsonParser) ParseValues(r []string) (string, int64, int64, error) {
 	if len(r) < 5 {
-		return 0, 0, errors.New("short line for splitting")
+		return "", 0, 0, errors.New("short line for splitting")
 	}
 	price, err := strconv.Atoi(r[3])
 	if err != nil {
-		return 0, 0, err
+		return "", 0, 0, err
 	}
 	rating, err := strconv.Atoi(r[5])
 	if err != nil {
-		return 0, 0, err
+		return "", 0, 0, err
 	}
-	return int64(price), int64(rating), nil
+	return r[1], int64(price), int64(rating), nil
 }
 
 type CsvParser struct{}
@@ -47,19 +46,19 @@ func (p CsvParser) Split(r rune) bool {
 	return r == ';'
 }
 
-func (p CsvParser) ParseValues(r []string) (int64, int64, error) {
+func (p CsvParser) ParseValues(r []string) (string, int64, int64, error) {
 	if len(r) < 3 {
-		return 0, 0, errors.New("short line for splitting")
+		return "", 0, 0, errors.New("short line for splitting")
 	}
 	price, err := strconv.Atoi(r[1])
 	if err != nil {
-		return 0, 0, err
+		return "", 0, 0, err
 	}
 	rating, err := strconv.Atoi(r[2])
 	if err != nil {
-		return 0, 0, err
+		return "", 0, 0, err
 	}
-	return int64(price), int64(rating), nil
+	return r[0], int64(price), int64(rating), nil
 }
 
 func initParser(filename string) Parser {
@@ -83,6 +82,13 @@ func initFlags() (string, int) {
 	return *filename, *countLimit
 }
 
+type Product struct {
+	sync.Mutex
+	Product string
+	Price   int64
+	Rating  int64
+}
+
 func main() {
 	filename, countLimit := initFlags()
 	var parser = initParser(filename)
@@ -95,12 +101,12 @@ func main() {
 	var wg sync.WaitGroup
 	limit := make(chan struct{}, countLimit)
 	scanner := bufio.NewScanner(file)
-	var maxPrice int64
-	var maxRating int64
+	productWithMaxPrice := Product{}
+	productWithMaxRating := Product{}
 
 	for scanner.Scan() {
 		values := strings.FieldsFunc(scanner.Text(), parser.Split)
-		price, rating, err := parser.ParseValues(values)
+		product, price, rating, err := parser.ParseValues(values)
 		if err == nil {
 			wg.Add(1)
 			limit <- struct{}{}
@@ -109,17 +115,25 @@ func main() {
 					wg.Done()
 					<-limit
 				}()
-				maxPriceValue := atomic.LoadInt64(&maxPrice)
-				if maxPriceValue < price {
-					atomic.StoreInt64(&maxPrice, price)
+				productWithMaxPrice.Lock()
+				if productWithMaxPrice.Price < price {
+					productWithMaxPrice.Product = product
+					productWithMaxPrice.Price = price
+					productWithMaxPrice.Rating = rating
 				}
-				maxRatingValue := atomic.LoadInt64(&maxRating)
-				if maxRatingValue < rating {
-					atomic.StoreInt64(&maxRating, rating)
+				productWithMaxPrice.Unlock()
+				productWithMaxRating.Lock()
+				if productWithMaxRating.Rating < rating {
+					productWithMaxRating.Product = product
+					productWithMaxRating.Price = price
+					productWithMaxRating.Rating = rating
 				}
+				productWithMaxRating.Unlock()
 			}()
 		}
 	}
 	wg.Wait()
-	fmt.Println("Max price:", maxPrice, "Max rating:", maxRating)
+
+	fmt.Println("Product with max price:", productWithMaxPrice.Product)
+	fmt.Println("Product with max rating:", productWithMaxRating.Product)
 }
